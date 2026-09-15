@@ -1,169 +1,106 @@
-import requests
-import csv
+import base64
+import hashlib
+import json
+import lzma
 import os
-from datetime import datetime
-from tqdm import tqdm
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import urllib.request
 
-# CSV file location
-csv_file_path = 'data/wbuserdata.csv'  # Adjusted for GitHub Pages directory
+subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'pandas', 'pyreadstat'])
+import pandas as pd
+import pyreadstat
 
-# Mapping for human-readable names for damage dealt
-damage_names = {
-    'p09': 'AirStrike',
-    'p11': 'BGM',
-    'p52': 'TankLvl1',
-    'p53': 'APCLvl1',
-    'p54': 'HeliLvl1',
-    'p55': 'TankLvl2',
-    'p56': 'APCLvl2',
-    'p57': 'HeliLvl2',
-    'p58': 'TankLvl3',
-    'p59': 'APCLvl3',
-    'p60': 'HeliLvl3',
-    'p61': 'ARRifle',
-    'p62': 'AKRifle',
-    'p63': 'Pistol',
-    'p64': 'HuntingRifle',
-    'p65': 'RPG',
-    'p66': 'Shotgun',
-    'p67': 'SniperRifle',
-    'p68': 'SMG',
-    'p69': 'Homing',
-    'p71': 'Grenade',
-    'p74': 'HeliMinigun',
-    'p75': 'TankMinigun',
-    'p76': 'Knife',
-    'p78': 'Revolver',
-    'p79': 'Minigun',
-    'p80': 'GrenadeLauncher',
-    'p81': 'SmokeGrenade',
-    'p82': 'Jet1Rockets',
-    'p83': 'Jet1Homing',
-    'p84': 'Jet1MachineGun',
-    'p85': 'Jet2Rockets',
-    'p86': 'Jet2Homing',
-    'p87': 'Jet2MachineGun',
-    'p88': 'Fists',
-    'p89': 'VSS',
-    'p90': 'FiftyCalSniper',
-    'p91': 'MGTurret',
-    'p92': 'Crossbow',
-    'p93': 'SCAR',
-    'p94': 'TacticalShotgun',
-    'p95': 'VEK',
-    'p96': 'Desert',
-    'p97': 'Auto',
-    'p98': 'LMG',
-    'p99': 'UNRELEASED_WEAPON_99',
-    'p100': 'UnreleasedMace',
-    'p101': 'RubberChicken',
-    'p102': 'UnreleasedButterfly',
-    'p103': 'Chainsaw',
-    'p104': 'AKSMG',
-    'p105': 'AutoSniper',
-    'p106': 'UnreleasedAR',
-    'p107': 'UnreleasedSawedOff',
-    'p108': 'HealingPistol',
-    'p109': 'UnreleasedMP7',
-    'p110': 'ImplosionGrenade',
-    'p111': 'LaserTripMine',
-    'p112': 'ConcussionGrenade',
-    'p126': 'G3A3'
+root = Path('afro_raw_work')
+src = root / 'official'
+out = root / 'repo_payload'
+src.mkdir(parents=True, exist_ok=True)
+out.mkdir(parents=True, exist_ok=True)
+
+sources = {
+    'KEN_R10_2024_official.sav': 'https://www.afrobarometer.org/wp-content/uploads/2025/06/KEN_R10.Data_28June24.wtd_.final_.release_updated.13Feb25.sav',
+    'MDG_R10_2024_official.csv': 'https://www.afrobarometer.org/wp-content/uploads/2025/11/MAD_R10.Data_02Dec24.wtd_.final_.release_updated.13Feb25.csv',
+    'NGA_R10_2024_official.csv': 'https://www.afrobarometer.org/wp-content/uploads/2025/11/NIG_R10.Data_18Nov24.wtd_.final_.release_updated.13Feb25.csv',
+    'TZA_R10_2024_official.sav': 'https://www.afrobarometer.org/wp-content/uploads/2025/11/TAN_R10.Data_20Sep24.wtd_.final_.release_updated.13Feb25.sav',
+    'ZMB_R10_2024_official.csv': 'https://www.afrobarometer.org/wp-content/uploads/2025/11/ZAM_R10.Data_27Sep24.wtd_.final_.release_updated.13Feb25.csv',
+    'ZAF_R9_2022_official.sav': 'https://www.afrobarometer.org/wp-content/uploads/2024/02/SAF_R9.data_.final_.wtd_release.30May23.sav',
+}
+expected_sha256 = {
+    'KEN_R10_2024_official.sav': '6b53c17ddcd5cd5613446d2da2d8a034476bfd2c93baaf87d3e5a52d940a8ccd',
+    'MDG_R10_2024_official.csv': 'e165d5d782beb9d531b1161581a6cd52698052a8b8d8cf5909d83b8e78a741da',
+    'NGA_R10_2024_official.csv': 'abd2cbccb6f9739576e0c76c276672ae0ca49233b537b0c2e77a2c8d2e4dddb7',
+    'TZA_R10_2024_official.sav': '009e0807e5bfda90001277b566ea2e3e5c0ead5489fa10ecc1f8667daf17a60e',
+    'ZMB_R10_2024_official.csv': '6d4247ed626030f1663d38852a270ef5fc983c7b92397f738db7831690a2ff53',
+    'ZAF_R9_2022_official.sav': 'd99670bc7c30be675ac789ee41f0034c379d333b16951ac78e2d9571a582f75b',
 }
 
-# API URLs
-player_list_url = "http://ratsstats.ddns.net/get_player_list.php?squad=true"
-player_info_url = "http://ratsstats.ddns.net/get_player_stats.php?uid={}"
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(block)
+    return h.hexdigest()
 
-# Credentials
-RATS_USER = os.getenv('RATS_USER')
-RATS_PASS = os.getenv('RATS_PASS')
+manifest = {
+    'generated_utc': pd.Timestamp.utcnow().isoformat(),
+    'source': 'Afrobarometer official country data downloads',
+    'note': 'Five paper countries use Round 10 (2024). South Africa uses the latest publicly released respondent-level file, Round 9 (2022); Round 10 (2025) summary results exist but respondent microdata were not publicly listed as of 2026-09-14.',
+    'files': []
+}
 
-# Get the current date
-today = datetime.today().strftime('%d%m%Y')
+for name, url in sources.items():
+    p = src / name
+    print('Downloading', url)
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req, timeout=180) as r, open(p, 'wb') as f:
+        shutil.copyfileobj(r, f)
+    got = sha256(p)
+    if got != expected_sha256[name]:
+        raise RuntimeError(f'SHA mismatch for {name}: {got} != {expected_sha256[name]}')
 
-# Function to get player list
-def get_player_list():
-    response = requests.get(player_list_url, auth=(RATS_USER, RATS_PASS))
-    response.raise_for_status()
-    return response.json()
+    rec = {'official_filename': name, 'source_url': url, 'official_sha256': got, 'official_bytes': p.stat().st_size}
+    if p.suffix.lower() == '.sav':
+        df, meta = pyreadstat.read_sav(str(p), apply_value_formats=False)
+        csv_name = name.replace('_official.sav', '_raw_codes.csv')
+        csv_path = out / csv_name
+        df.to_csv(csv_path, index=False)
+        metadata = {
+            'source_file': name,
+            'number_rows': len(df),
+            'number_columns': len(df.columns),
+            'column_names': list(df.columns),
+            'column_labels': dict(zip(meta.column_names, meta.column_labels)),
+            'variable_value_labels': meta.variable_value_labels,
+            'missing_ranges': meta.missing_ranges,
+        }
+        meta_path = out / name.replace('_official.sav', '_sav_metadata.json')
+        meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, default=str) + '\n', encoding='utf-8')
+        rec.update({'repo_data_file': csv_name, 'repo_metadata_file': meta_path.name, 'rows': len(df), 'columns': len(df.columns), 'repo_data_sha256': sha256(csv_path)})
+    else:
+        dest = out / name
+        shutil.copyfile(p, dest)
+        df = pd.read_csv(dest, low_memory=False)
+        rec.update({'repo_data_file': dest.name, 'rows': len(df), 'columns': len(df.columns), 'repo_data_sha256': sha256(dest)})
+    manifest['files'].append(rec)
 
-# Function to get player info
-def get_player_info(uid):
-    response = requests.get(player_info_url.format(uid), auth=(RATS_USER, RATS_PASS))
-    response.raise_for_status()
-    return response.json()
+(out / 'MANIFEST.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+(out / 'README.md').write_text('''# Afrobarometer respondent-level source data\n\nThis archive contains the complete respondent-level country files used for the Digital Empires Afrobarometer benchmark. Official CSV releases are preserved byte-for-byte. Official SAV releases are converted to CSV with raw numeric codes (`apply_value_formats=False`) and accompanied by JSON preserving column labels and value labels. Exact official source URLs and SHA-256 hashes are in `MANIFEST.json`.\n\nSouth Africa uses Round 9 (2022), the latest respondent-level public release located on 2026-09-14. Round 10 fieldwork was conducted in 2025 and its aggregate Summary of Results is used in the paper benchmark, but respondent-level Round 10 data were not publicly listed at that time.\n''', encoding='utf-8')
 
-# Function to map damage dealt to human-readable names
-def map_damage_dealt(damage_dealt):
-    return {damage_names.get(k, k): v for k, v in damage_dealt.items()}
+# Create a single solid tar.xz payload of repo-ready respondent data + metadata.
+tar_path = Path('afrobarometer_raw_respondent_data.tar')
+with tarfile.open(tar_path, 'w') as tf:
+    for p in sorted(out.iterdir()):
+        tf.add(p, arcname=p.name)
 
-# Ensure the CSV file exists and has headers
-if not os.path.exists(csv_file_path):
-    headers = ['Date', 'Squad', 'Name', 'UserID', 'Level', 'XP', 'JoinTime', 'PingTime', 'Banned', 'Coins', 
-               'KillsELO', 'GamesELO', 'Number_of_Jumps', 'Zombie_Deaths', 'Zombie_Kills', 'Zombie_Wins', 'Time', 
-               'Time_Alive_Count', 'Time_Alive_Longest', 'Time_Alive', 'Zombie_Time_Alive_Count', 'Zombie_Time_Alive'] \
-              + list(damage_names.values()) + [f"Losses_{key}" for key in ['m00', 'm10', 'm09', 'm08', 'm07']]
-    os.makedirs(os.path.dirname(csv_file_path), exist_ok=True)
-    with open(csv_file_path, 'w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(headers)
+xz_path = Path(str(tar_path) + '.xz')
+with open(tar_path, 'rb') as fi, lzma.open(xz_path, 'wb', preset=9 | lzma.PRESET_EXTREME) as fo:
+    shutil.copyfileobj(fi, fo)
 
-# Get the list of players
-players = get_player_list()
-
-# Calculate total number of players for the progress bar
-total_players = len(players)
-
-# Create a progress bar for processing players
-with tqdm(total=total_players, desc="Processing Players", unit="player") as progress_bar:
-    for player in players:
-        try:
-            player_info = get_player_info(player['uid'])
-
-            # Skip if player_info is None
-            if not player_info:
-                continue
-
-            # Ensure player_info['losses'] is a dictionary
-            losses = player_info.get('losses', {}) if isinstance(player_info.get('losses', {}), dict) else {}
-
-            damage_dealt = map_damage_dealt(player_info.get('damage_dealt', {}))
-
-            # Create a row with all relevant player info
-            row = [
-                today,
-                player_info.get('squad'),
-                player_info.get('nick'),
-                player['uid'],  # Add UserID to the row
-                player_info.get('level'),
-                player_info.get('xp'),
-                    player_info.get('joinTime'),
-                    player_info.get('ping_time'),
-                    player_info.get('banned'),
-                    player_info.get('coins'),
-                    player_info.get('killsELO'),
-                    player_info.get('gamesELO'),
-                    player_info.get('number_of_jumps'),
-                    player_info.get('zombie_deaths'),
-                    player_info.get('zombie_kills'),
-                    player_info.get('zombie_wins'),
-                    player_info.get('time'),
-                    player_info.get('time_alive_count'),
-                    player_info.get('time_alive_longest'),
-                    player_info.get('time_alive'),
-                    player_info.get('zombie_time_alive_count'),
-                    player_info.get('zombie_time_alive')
-                ] + [damage_dealt.get(name, 0) for name in damage_names.values()] \
-                  + [losses.get(key, 0) for key in ['m00', 'm10', 'm09', 'm08', 'm07']]
-
-                # Append data to the CSV file
-                with open(csv_file_path, 'a', newline='') as file:
-                    writer = csv.writer(file)
-                    writer.writerow(row)
-
-        except Exception as e:
-            print(f"Error processing user {player['uid']}: {e}")
-
-        # Update the progress bar
-        progress_bar.update(1)
+payload = base64.b64encode(xz_path.read_bytes()).decode('ascii')
+Path('data').mkdir(exist_ok=True)
+Path('data/wbuserdata.csv').write_text(payload + '\n', encoding='ascii')
+print('payload chars', len(payload), 'archive bytes', xz_path.stat().st_size)
+print(json.dumps(manifest, indent=2))
